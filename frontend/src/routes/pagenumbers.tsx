@@ -12,7 +12,7 @@ function PageNumbersPage() {
   return (
     <ToolPage
       title="Add Page Numbers"
-      description="Add page numbers to your PDF"
+      description="Automatically add page numbers to every page of your PDF"
       operation="pagenumbers"
     />
   );

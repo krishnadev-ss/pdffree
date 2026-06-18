@@ -15,6 +15,9 @@ import { Route as esignRoute } from './routes/esign';
 import { Route as ocrRoute } from './routes/ocr';
 import { Route as flattenRoute } from './routes/flatten';
 import { Route as convertRoute } from './routes/convert';
+import { Route as shareRoute } from './routes/share';
+import { Route as shareViewRoute } from './routes/share.$id';
+import { Route as transferRoute } from './routes/transfer';
 
 const routeTree = rootRoute.addChildren([
   indexRoute,
@@ -32,6 +35,9 @@ const routeTree = rootRoute.addChildren([
   ocrRoute,
   flattenRoute,
   convertRoute,
+  shareRoute,
+  shareViewRoute,
+  transferRoute,
 ]);
 
 export const router = createRouter({ routeTree });

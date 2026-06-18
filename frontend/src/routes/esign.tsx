@@ -12,7 +12,7 @@ function ESignPage() {
   return (
     <ToolPage
       title="e-Sign PDF"
-      description="Add your signature to a PDF document"
+      description="Add your signature to any PDF document. Draw, type, or upload your signature."
       operation="esign"
     />
   );

@@ -12,7 +12,7 @@ function MergePage() {
   return (
     <ToolPage
       title="Merge PDF"
-      description="Combine multiple PDF files into a single document"
+      description="Combine multiple PDF files into a single document. Drop all the files you want to merge."
       operation="merge"
       multiple={true}
     />

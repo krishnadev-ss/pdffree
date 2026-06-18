@@ -12,7 +12,7 @@ function RepairPage() {
   return (
     <ToolPage
       title="Repair PDF"
-      description="Fix corrupted or damaged PDF files"
+      description="Fix broken or corrupted PDF files that won't open properly"
       operation="repair"
     />
   );

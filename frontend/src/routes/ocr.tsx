@@ -12,7 +12,7 @@ function OcrPage() {
   return (
     <ToolPage
       title="OCR - Text Recognition"
-      description="Extract text from scanned PDF documents"
+      description="Extract searchable text from scanned documents and images in PDFs"
       operation="ocr"
     />
   );

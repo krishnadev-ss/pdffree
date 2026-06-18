@@ -14,6 +14,8 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"math/rand"
+
 	"github.com/google/uuid"
 	"github.com/krishnadev-ss/pdffree/api/config"
 	"github.com/krishnadev-ss/pdffree/api/middleware"
@@ -29,6 +31,9 @@ type Handler struct {
 	jobs          sync.Map          // map[string]*models.Job
 	idempotency   sync.Map          // map[string]string (idempotency key -> job ID)
 	ipJobs        sync.Map          // map[string]*int32 (IP -> concurrent job count)
+	shares        sync.Map          // map[string]*models.Share
+	transfers     sync.Map          // map[string]*models.Transfer (by ID)
+	transferKeys  sync.Map          // map[string]string (unlock key -> transfer ID)
 	s3Client      *s3.Client
 	presignClient *s3.PresignClient
 }
@@ -75,6 +80,12 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/jobs/{id}", h.handleGetJob)
 	mux.HandleFunc("GET /api/jobs/{id}/stream", h.handleStreamJob)
 	mux.HandleFunc("GET /api/health", h.handleHealth)
+
+	// Share & Transfer routes
+	mux.HandleFunc("POST /api/shares", h.handleCreateShare)
+	mux.HandleFunc("GET /api/shares/{id}", h.handleGetShare)
+	mux.HandleFunc("POST /api/transfers", h.handleCreateTransfer)
+	mux.HandleFunc("POST /api/transfers/unlock", h.handleUnlockTransfer)
 }
 
 // handlePresign generates a pre-signed PUT URL for uploading a file to R2.
@@ -444,6 +455,219 @@ func extractIP(r *http.Request) string {
 		}
 	}
 	return addr
+}
+
+// generateUnlockKey creates a 6-character alphanumeric code for instant transfers.
+func generateUnlockKey() string {
+	const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // no 0/O/1/I to avoid confusion
+	b := make([]byte, 6)
+	for i := range b {
+		b[i] = chars[rand.Intn(len(chars))]
+	}
+	return string(b)
+}
+
+// handleCreateShare creates a shareable download link for uploaded files.
+func (h *Handler) handleCreateShare(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+
+	var req models.ShareRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if len(req.FileKeys) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file_keys is required"})
+		return
+	}
+
+	expiresIn := req.ExpiresIn
+	if expiresIn <= 0 {
+		expiresIn = 24
+	}
+	if expiresIn > 72 {
+		expiresIn = 72
+	}
+
+	now := time.Now().UTC()
+	share := &models.Share{
+		ID:           uuid.New().String(),
+		FileKeys:     req.FileKeys,
+		Message:      req.Message,
+		MaxDownloads: req.MaxDownloads,
+		IP:           extractIP(r),
+		CreatedAt:    now,
+		ExpiresAt:    now.Add(time.Duration(expiresIn) * time.Hour),
+	}
+
+	h.shares.Store(share.ID, share)
+
+	log.Printf("[shares] reqID=%s created share %s, expires in %dh", reqID, share.ID, expiresIn)
+	writeJSON(w, http.StatusCreated, models.ShareResponse{
+		ShareID:   share.ID,
+		ShareURL:  fmt.Sprintf("/share/%s", share.ID),
+		ExpiresAt: share.ExpiresAt.Format(time.RFC3339),
+	})
+}
+
+// handleGetShare retrieves a share and generates download URLs.
+func (h *Handler) handleGetShare(w http.ResponseWriter, r *http.Request) {
+	shareID := r.PathValue("id")
+	if shareID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "share ID is required"})
+		return
+	}
+
+	val, ok := h.shares.Load(shareID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "share not found"})
+		return
+	}
+
+	share := val.(*models.Share)
+
+	// Check expiry.
+	if time.Now().After(share.ExpiresAt) {
+		writeJSON(w, http.StatusGone, map[string]string{"error": "share link has expired"})
+		return
+	}
+
+	// Check download limit.
+	if share.MaxDownloads > 0 && share.DownloadCount >= share.MaxDownloads {
+		writeJSON(w, http.StatusGone, map[string]string{"error": "download limit reached"})
+		return
+	}
+
+	// Generate download URLs.
+	downloadURLs := make([]string, 0, len(share.FileKeys))
+	for _, key := range share.FileKeys {
+		url, err := h.generateDownloadURL(r.Context(), key)
+		if err != nil {
+			log.Printf("[shares] error generating download URL for key %s: %v", key, err)
+			continue
+		}
+		downloadURLs = append(downloadURLs, url)
+	}
+
+	share.DownloadCount++
+	h.shares.Store(share.ID, share)
+
+	writeJSON(w, http.StatusOK, models.ShareStatusResponse{
+		ID:            share.ID,
+		FileKeys:      share.FileKeys,
+		Message:       share.Message,
+		DownloadCount: share.DownloadCount,
+		MaxDownloads:  share.MaxDownloads,
+		ExpiresAt:     share.ExpiresAt.Format(time.RFC3339),
+		Expired:       false,
+		DownloadURLs:  downloadURLs,
+	})
+}
+
+// handleCreateTransfer creates an instant transfer with an unlock key.
+func (h *Handler) handleCreateTransfer(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+
+	var req models.TransferRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if len(req.FileKeys) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file_keys is required"})
+		return
+	}
+
+	now := time.Now().UTC()
+	unlockKey := generateUnlockKey()
+
+	transfer := &models.Transfer{
+		ID:        uuid.New().String(),
+		UnlockKey: unlockKey,
+		FileKeys:  req.FileKeys,
+		Message:   req.Message,
+		IP:        extractIP(r),
+		CreatedAt: now,
+		ExpiresAt: now.Add(1 * time.Hour), // transfers expire in 1 hour
+	}
+
+	h.transfers.Store(transfer.ID, transfer)
+	h.transferKeys.Store(unlockKey, transfer.ID)
+
+	log.Printf("[transfers] reqID=%s created transfer %s with key %s", reqID, transfer.ID, unlockKey)
+	writeJSON(w, http.StatusCreated, models.TransferResponse{
+		TransferID: transfer.ID,
+		UnlockKey:  unlockKey,
+		ExpiresAt:  transfer.ExpiresAt.Format(time.RFC3339),
+	})
+}
+
+// handleUnlockTransfer claims a transfer using the unlock key.
+func (h *Handler) handleUnlockTransfer(w http.ResponseWriter, r *http.Request) {
+	var req models.TransferUnlockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	key := strings.ToUpper(strings.TrimSpace(req.UnlockKey))
+	if key == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unlock_key is required"})
+		return
+	}
+
+	// Look up transfer by key.
+	transferIDVal, ok := h.transferKeys.Load(key)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "invalid unlock key"})
+		return
+	}
+
+	transferID := transferIDVal.(string)
+	val, ok := h.transfers.Load(transferID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "transfer not found"})
+		return
+	}
+
+	transfer := val.(*models.Transfer)
+
+	// Check expiry.
+	if time.Now().After(transfer.ExpiresAt) {
+		writeJSON(w, http.StatusGone, map[string]string{"error": "transfer has expired"})
+		return
+	}
+
+	// Check if already claimed.
+	if transfer.Claimed {
+		writeJSON(w, http.StatusGone, map[string]string{"error": "transfer has already been claimed"})
+		return
+	}
+
+	// Generate download URLs.
+	downloadURLs := make([]string, 0, len(transfer.FileKeys))
+	for _, fileKey := range transfer.FileKeys {
+		url, err := h.generateDownloadURL(r.Context(), fileKey)
+		if err != nil {
+			log.Printf("[transfers] error generating download URL for key %s: %v", fileKey, err)
+			continue
+		}
+		downloadURLs = append(downloadURLs, url)
+	}
+
+	// Mark as claimed.
+	transfer.Claimed = true
+	h.transfers.Store(transferID, transfer)
+
+	log.Printf("[transfers] transfer %s claimed with key %s", transferID, key)
+	writeJSON(w, http.StatusOK, models.TransferUnlockResponse{
+		TransferID:   transferID,
+		Message:      transfer.Message,
+		DownloadURLs: downloadURLs,
+		ExpiresAt:    transfer.ExpiresAt.Format(time.RFC3339),
+	})
 }
 
 // writeJSON writes a JSON response with the given status code.

@@ -12,7 +12,7 @@ function FlattenPage() {
   return (
     <ToolPage
       title="Flatten PDF"
-      description="Flatten PDF form fields"
+      description="Lock all form fields and annotations permanently so they can't be edited"
       operation="flatten"
     />
   );

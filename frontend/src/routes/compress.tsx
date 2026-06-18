@@ -12,7 +12,7 @@ function CompressPage() {
   return (
     <ToolPage
       title="Compress PDF"
-      description="Reduce your PDF file size"
+      description="Make your PDF smaller without losing quality. Perfect for email attachments."
       operation="compress"
     />
   );
