@@ -1,0 +1,296 @@
+openapi: "3.0.3"
+info:
+  title: PDFFree API
+  description: A free, open-source PDF processing API
+  version: 1.0.0
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /api/presign:
+    post:
+      summary: Request presigned upload URL
+      operationId: createPresignedUrl
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PresignRequest"
+      responses:
+        "200":
+          description: Presigned URL created
+          headers:
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PresignResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/jobs:
+    post:
+      summary: Submit a PDF processing job
+      operationId: createJob
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateJobRequest"
+      responses:
+        "201":
+          description: Job created
+          headers:
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateJobResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Duplicate idempotency key
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limit exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/jobs/{id}:
+    get:
+      summary: Get job status
+      operationId: getJob
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Job status
+          headers:
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatus"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/jobs/{id}/stream:
+    get:
+      summary: Stream job progress via SSE
+      operationId: streamJob
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: SSE event stream
+          headers:
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-Sent Events stream with job progress updates
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/health:
+    get:
+      summary: Health check
+      operationId: healthCheck
+      responses:
+        "200":
+          description: Service health status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+components:
+  headers:
+    X-RateLimit-Limit:
+      description: Maximum requests allowed per window
+      schema:
+        type: integer
+    X-RateLimit-Remaining:
+      description: Remaining requests in current window
+      schema:
+        type: integer
+
+  schemas:
+    PresignRequest:
+      type: object
+      required:
+        - filename
+        - contentType
+      properties:
+        filename:
+          type: string
+          description: Original filename of the upload
+          example: document.pdf
+        contentType:
+          type: string
+          description: MIME type of the file
+          example: application/pdf
+
+    PresignResponse:
+      type: object
+      required:
+        - uploadUrl
+        - fileKey
+      properties:
+        uploadUrl:
+          type: string
+          format: uri
+          description: Presigned URL for uploading the file
+        fileKey:
+          type: string
+          description: Unique key identifying the uploaded file
+
+    CreateJobRequest:
+      type: object
+      required:
+        - operation
+        - fileKeys
+        - idempotencyKey
+      properties:
+        operation:
+          type: string
+          description: PDF operation to perform
+          example: merge
+        fileKeys:
+          type: array
+          items:
+            type: string
+          description: List of file keys to process
+          minItems: 1
+        options:
+          type: object
+          additionalProperties: true
+          description: Operation-specific options
+        idempotencyKey:
+          type: string
+          description: Client-provided idempotency key to prevent duplicate submissions
+          example: 550e8400-e29b-41d4-a716-446655440000
+
+    CreateJobResponse:
+      type: object
+      required:
+        - jobId
+      properties:
+        jobId:
+          type: string
+          format: uuid
+          description: Unique identifier for the created job
+
+    JobStatus:
+      type: object
+      required:
+        - id
+        - status
+        - progress
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - queued
+            - processing
+            - done
+            - failed
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Job completion percentage
+        downloadUrl:
+          type: string
+          format: uri
+          description: URL to download the result (present when status is done)
+        error:
+          type: string
+          description: Error message (present when status is failed)
+        fileSizeBytes:
+          type: integer
+          description: Size of the output file in bytes (present when status is done)
+
+    HealthResponse:
+      type: object
+      required:
+        - ok
+        - queueDepth
+        - workerCount
+      properties:
+        ok:
+          type: boolean
+        queueDepth:
+          type: integer
+          description: Number of jobs currently in the queue
+        workerCount:
+          type: integer
+          description: Number of active workers
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Human-readable error message

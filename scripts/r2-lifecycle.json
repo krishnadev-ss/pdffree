@@ -1,0 +1,17 @@
+{
+  "rules": [
+    {
+      "id": "auto-delete-after-1-hour",
+      "enabled": true,
+      "conditions": {
+        "age": 3600
+      },
+      "actions": {
+        "deleteObject": true
+      },
+      "abortIncompleteMultipartUpload": {
+        "daysAfterInitiation": 1
+      }
+    }
+  ]
+}

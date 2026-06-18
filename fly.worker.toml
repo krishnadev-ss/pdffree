@@ -1,0 +1,26 @@
+app = "pdffree-worker"
+primary_region = "iad"
+
+[build]
+  dockerfile = "worker/Dockerfile"
+
+[env]
+  # Populated via fly secrets or Terraform
+  # WORKER_COUNT = "4"
+  # MAX_FILE_SIZE = "104857600"
+  # R2_ENDPOINT = ""
+  # R2_BUCKET = ""
+  # REDIS_URL = ""
+
+[processes]
+  worker = "/worker"
+
+[[vm]]
+  memory = "1gb"
+  cpu_kind = "shared"
+  cpus = 2
+  processes = ["worker"]
+
+[scaling]
+  min_machines = 1
+  max_machines = 10
